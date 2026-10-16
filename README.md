@@ -64,7 +64,7 @@ mypy
 python -m build
 ```
 
-This contract package is pre-alpha and is not a production certification. Hosted CI, release
+This contract package is in alpha and is not a production certification. Hosted CI, release
 provenance, cross-implementation conformance, and deployment/load validation remain release gates.
 
 Licensed under Apache-2.0.

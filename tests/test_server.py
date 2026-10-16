@@ -22,6 +22,27 @@ def test_settings_reject_unsafe_or_unbounded_values() -> None:
         WebSocketServerSettings(origins=["https://app.example"])  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"origins": ("https://app.example", "HTTPS://APP.EXAMPLE:443")},
+        {"origins": ("https://*.example",)},
+        {"origins": ("https://app.example:",)},
+        {"origins": ("https://app.example",) * 65},
+        {"subprotocols": ("chat", "chat")},
+        {"subprotocols": ("chat\r\nInjected: value",)},
+        {"subprotocols": ("p" * 129,)},
+        {"subprotocols": ("chat",) * 65},
+        {"path": "/ws\nInjected"},
+    ],
+)
+def test_settings_reject_ambiguous_or_unbounded_origins_and_protocols(
+    settings: dict[str, object],
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        WebSocketServerSettings(**settings)  # type: ignore[arg-type]
+
+
 @pytest.mark.asyncio
 async def test_server_round_trip_and_graceful_shutdown() -> None:
     from websockets.asyncio.client import connect

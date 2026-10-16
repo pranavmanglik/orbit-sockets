@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from orbit_sockets import SocketClose, SocketHandler, SocketMessage
 from orbit_sockets.errors import SocketClosedError, SocketError
+
+_SUBPROTOCOL_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}\Z")
+_MAX_ORIGINS = 64
+_MAX_SUBPROTOCOLS = 64
 
 if TYPE_CHECKING:
     from websockets.asyncio.server import Server, ServerConnection
@@ -38,7 +43,12 @@ class WebSocketServerSettings:
     server_header: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.host, str) or not self.host or "\x00" in self.host:
+        if (
+            not isinstance(self.host, str)
+            or not self.host
+            or len(self.host) > 255
+            or any(ord(character) < 33 or ord(character) > 126 for character in self.host)
+        ):
             raise ValueError("host must be a non-empty bind address.")
         if (
             isinstance(self.port, bool)
@@ -49,30 +59,35 @@ class WebSocketServerSettings:
         if (
             not isinstance(self.path, str)
             or not self.path.startswith("/")
+            or len(self.path) > 1_024
             or "?" in self.path
             or "#" in self.path
+            or any(ord(character) < 33 or ord(character) > 126 for character in self.path)
         ):
-            raise ValueError("path must be an absolute path without query or fragment.")
+            raise ValueError("path must be bounded printable ASCII without query or fragment.")
+        if not isinstance(self.origins, tuple) or not isinstance(self.subprotocols, tuple):
+            raise TypeError("origins and subprotocols must be immutable tuples.")
         if not self.origins:
             raise ValueError(
                 "origins must explicitly allow one or more Origins, or None for no Origin."
             )
-        if not isinstance(self.origins, tuple) or not isinstance(self.subprotocols, tuple):
-            raise TypeError("origins and subprotocols must be immutable tuples.")
+        if len(self.origins) > _MAX_ORIGINS:
+            raise ValueError(f"origins cannot contain more than {_MAX_ORIGINS} entries.")
+        if len(self.subprotocols) > _MAX_SUBPROTOCOLS:
+            raise ValueError(f"subprotocols cannot contain more than {_MAX_SUBPROTOCOLS} entries.")
+        origin_keys: set[tuple[str, str, int | None] | None] = set()
         for origin in self.origins:
-            if origin is None:
-                continue
-            parsed = urlsplit(origin)
-            if (
-                not origin.startswith(("http://", "https://"))
-                or not parsed.hostname
-                or parsed.path
-                or parsed.query
-                or parsed.fragment
-                or parsed.username
-                or parsed.password
-            ):
-                raise ValueError("each allowed origin must be an HTTP(S) origin without a path.")
+            key = None if origin is None else _normalize_origin(origin)
+            if key in origin_keys:
+                raise ValueError("origins must be unique, including at most one no-Origin entry.")
+            origin_keys.add(key)
+        if any(
+            not isinstance(protocol, str) or _SUBPROTOCOL_TOKEN.fullmatch(protocol) is None
+            for protocol in self.subprotocols
+        ):
+            raise ValueError("subprotocols must be unique bounded HTTP token values.")
+        if len(set(self.subprotocols)) != len(self.subprotocols):
+            raise ValueError("subprotocols must be unique bounded HTTP token values.")
         if (
             isinstance(self.max_connections, bool)
             or not isinstance(self.max_connections, int)
@@ -119,6 +134,40 @@ class WebSocketServerSettings:
                 raise ValueError(f"{name} must be None or between 0.1 and 300 seconds.")
         if self.compression not in {None, "deflate"}:
             raise ValueError("compression must be None or 'deflate'.")
+
+
+def _normalize_origin(value: str) -> tuple[str, str, int | None]:
+    """Validate one exact browser Origin and normalize its scheme, host, and effective port."""
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or len(value) > 512
+        or any(ord(character) <= 32 or ord(character) >= 127 for character in value)
+    ):
+        raise ValueError("each allowed origin must be a bounded ASCII HTTP(S) origin.")
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ValueError("each allowed origin must be a valid HTTP(S) origin.") from None
+    if (
+        scheme not in {"http", "https"}
+        or not hostname
+        or "*" in hostname
+        or parsed.netloc.endswith(":")
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or not value.lower().startswith(f"{scheme}://")
+    ):
+        raise ValueError("each allowed origin must be an exact HTTP(S) origin without a path.")
+    if port == (80 if scheme == "http" else 443):
+        port = None
+    return scheme, hostname.lower(), port
 
 
 class WebSocketSession:
